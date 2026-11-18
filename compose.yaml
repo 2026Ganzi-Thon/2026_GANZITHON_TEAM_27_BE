@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: court
+      POSTGRES_USER: court
+      POSTGRES_PASSWORD: local-only-password
+    ports:
+      - "127.0.0.1:54322:5432"
+    volumes:
+      - court-demo-db:/var/lib/postgresql/data
+      - ./db/schema-demo.sql:/docker-entrypoint-initdb.d/01-schema-demo.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "court", "-d", "court"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  court-demo-db:
