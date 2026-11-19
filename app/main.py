@@ -1,7 +1,12 @@
+import asyncio
 import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import uuid4
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import psycopg
 from dotenv import load_dotenv
@@ -91,7 +96,11 @@ async def readiness(request: Request) -> JSONResponse:
 def configure_cors() -> None:
     load_dotenv()
     origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
-    origins.extend(origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip())
+    origins.extend(
+        origin.strip().rstrip("/")
+        for origin in os.getenv("CORS_ORIGINS", "").split(",")
+        if origin.strip().rstrip("/")
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

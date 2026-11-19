@@ -149,8 +149,14 @@ _STAGE_PROMPTS = {
         "근거는 사용자가 명시한 내용만 최대 네 개로, 항목마다 40자 안팎의 짧은 문장으로 정리한다."
     ),
     "defense": (
-        "확인된 근거와 이전 답변을 참고해 중립적인 질문 하나를 한다. "
-        "이미 답한 질문을 반복하지 않고 반대 근거를 강요하지 않는다. "
+        "너는 생각법정의 변호인 역할이다. 확인된 근거와 직전 사용자 답변을 반영해 "
+        "사용자가 자신의 생각을 한 걸음 더 구체적으로 돌아볼 수 있도록 '질문 하나'만 만든다. "
+        "반드시 지켜야 할 규칙: "
+        "1) prompt는 반드시 물음표(?)로 끝나는 자연스러운 한국어 존댓말 질문 한 문장으로 작성한다. "
+        "2) 시스템 지시문을 그대로 옮겨 적거나, 사용자의 claim/thought 문장을 그대로 복사하지 않는다. "
+        "3) 이전 질문(turns)과 같거나 거의 같은 질문을 절대 반복하지 않는다. "
+        "4) 직전 사용자 답변이 있으면 그 답변 내용을 구체적으로 이어받아 다음 관점을 묻는다. "
+        "5) 직전 답변이 건너뛰기(skipped)나 떠오르지 않음(not_sure)이면 다른 각도에서 더 가볍게 묻는다. "
         + _ANSWER_OPTION_PROMPT
     ),
     "decision": (
@@ -352,40 +358,97 @@ def build_workflow(
     return graph.compile()
 
 
+def _format_user_message(stage: Stage, record: dict) -> str:
+    if stage != "defense":
+        return json.dumps(record, ensure_ascii=False)
+    turns = record.get("turns") or []
+    turn_num = len(turns) + 1
+    lines = [
+        f"현재 변론 단계: {turn_num}번째 질문 생성 (총 3개 중 {turn_num}번째)",
+        f"- 원래 생각: {record.get('thought', '')}",
+        f"- 검토할 주장: {record.get('claim', '')}",
+        f"- 사고 패턴: {', '.join(record.get('pattern_tags') or []) or '없음'}",
+        "- 확인된 근거: " + json.dumps(record.get("evidence") or [], ensure_ascii=False),
+    ]
+    if turns:
+        lines.append("\n[이전 변론 대화]")
+        for idx, turn in enumerate(turns, 1):
+            status = turn.get("answer_status") or "answered"
+            ans = turn.get("answer") or f"({status})"
+            lines.append(f"Q{idx}: {turn.get('question', '')}")
+            lines.append(f"A{idx}: {ans}")
+        last = turns[-1]
+        lines.append(
+            "\n위 이전 질문들과 절대 겹치지 않는 새로운 후속 질문을 한 문장으로 만들어라. "
+            f"특히 직전 답변({last.get('answer') or last.get('answer_status')})을 자연스럽게 반영해라."
+        )
+    else:
+        lines.append("\n위 생각과 근거를 바탕으로 첫 번째 변론 질문을 한 문장으로 만들어라.")
+    return "\n".join(lines)
+
+
+def _defense_issue(prompt: str, record: dict) -> str | None:
+    normalized = " ".join(prompt.split())
+    previous = [" ".join((t.get("question") or "").split()) for t in (record.get("turns") or [])]
+    if normalized in previous:
+        return "이전 질문과 완전히 같은 문장입니다. 전혀 다른 새로운 질문을 만들어 주세요."
+    for raw in (record.get("claim"), record.get("thought")):
+        if raw and normalized == " ".join(raw.split()):
+            return "사용자의 주장/생각을 그대로 복사했습니다. 사용자에게 묻는 질문 문장을 작성해 주세요."
+    if "중립적인 질문 하나를" in normalized or "이미 답한 질문을 반복하지" in normalized:
+        return "지시문을 그대로 출력했습니다. 사용자에게 직접 묻는 실제 질문을 작성해 주세요."
+    return None
+
+
 async def _upstage_draft(stage: Stage, record: dict, model: str, api_key: str) -> Draft:
     schema = _SCHEMAS[stage]
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": f"{_SYSTEM}\n{_STAGE_PROMPTS[stage]}"},
-            {"role": "user", "content": json.dumps(record, ensure_ascii=False)},
-        ],
-        "temperature": 0,
-        "max_tokens": 4096,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": f"court_{stage}",
-                "strict": True,
-                "schema": schema.model_json_schema(),
-            },
-        },
-    }
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": f"{_SYSTEM}\n{_STAGE_PROMPTS[stage]}"},
+        {"role": "user", "content": _format_user_message(stage, record)},
+    ]
+    temperature = 0.4 if stage in ("defense", "simplify", "rephrase") else 0.0
+    max_attempts = 2 if stage == "defense" else 1
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-        response = await client.post(
-            _UPSTAGE_CHAT_URL, headers={"Authorization": f"Bearer {api_key}"}, json=body
-        )
-        response.raise_for_status()
-    try:
-        choice = response.json()["choices"][0]
-        if choice["finish_reason"] != "stop":
-            raise UpstageResponseError("Upstage 응답 생성이 완료되지 않았습니다.")
-        content = choice["message"]["content"]
-        if not isinstance(content, str):
-            raise UpstageResponseError("Upstage 응답에 JSON 문장이 없습니다.")
-    except (ValueError, KeyError, IndexError, TypeError):
-        raise UpstageResponseError("Upstage 응답 구조를 확인하지 못했습니다.") from None
-    return schema.model_validate_json(content)
+        for attempt in range(max_attempts):
+            body = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature if attempt == 0 else 0.6,
+                "max_tokens": 4096,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": f"court_{stage}",
+                        "strict": True,
+                        "schema": schema.model_json_schema(),
+                    },
+                },
+            }
+            response = await client.post(
+                _UPSTAGE_CHAT_URL, headers={"Authorization": f"Bearer {api_key}"}, json=body
+            )
+            response.raise_for_status()
+            try:
+                choice = response.json()["choices"][0]
+                if choice["finish_reason"] != "stop":
+                    raise UpstageResponseError("Upstage 응답 생성이 완료되지 않았습니다.")
+                content = choice["message"]["content"]
+                if not isinstance(content, str):
+                    raise UpstageResponseError("Upstage 응답에 JSON 문장이 없습니다.")
+            except (ValueError, KeyError, IndexError, TypeError):
+                raise UpstageResponseError("Upstage 응답 구조를 확인하지 못했습니다.") from None
+
+            draft = schema.model_validate_json(content)
+            if stage == "defense" and attempt + 1 < max_attempts:
+                issue = _defense_issue(draft.prompt, record)
+                if issue:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": f"다시 작성해라: {issue}"})
+                    continue
+            return draft
+
+    raise UpstageResponseError("Upstage 응답 생성에 실패했습니다.")
 
 
 async def invoke_workflow(workflow, state: WorkflowState) -> dict:
