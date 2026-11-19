@@ -3,18 +3,53 @@
 import base64
 import binascii
 import json
+import os
 import re
 from datetime import datetime
 from typing import Annotated
-from uuid import UUID
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
-from fastapi import Header, Request
+from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import UUID4
 
 from app.database import Database
 
-DemoId = Annotated[UUID4, Header(alias="X-Demo-Id")]
+
+def _client_ip(request: Request) -> str:
+    """Render 등 리버스 프록시 뒤에서 실제 클라이언트 IP를 추출한다."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def resolve_demo_id(
+    request: Request,
+    x_demo_id: Annotated[str | None, Header(alias="X-Demo-Id")] = None,
+) -> UUID:
+    """DEMO_IDENTITY_MODE=ip(기본)이면 클라이언트 IP로 결정적 UUID를 생성하고, header이면 X-Demo-Id를 사용한다."""
+    mode = os.getenv("DEMO_IDENTITY_MODE", "ip").strip().lower()
+    if mode == "header":
+        try:
+            if not x_demo_id:
+                raise ValueError
+            value = UUID(x_demo_id.strip())
+            if value.version != 4:
+                raise ValueError
+            return value
+        except ValueError:
+            raise APIError(422, "INVALID_DEMO_ID", "X-Demo-Id에 UUID v4 값을 보내 주세요.") from None
+    return uuid5(NAMESPACE_DNS, f"arithon-ip:{_client_ip(request)}")
+
+
+DemoId = Annotated[UUID, Depends(resolve_demo_id)]
 
 
 class APIError(Exception):

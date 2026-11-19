@@ -1,6 +1,7 @@
 """Exhibition case flow and archive."""
 
 import hashlib
+import os
 from datetime import date, datetime, time, timezone
 from typing import Annotated, Literal
 from uuid import UUID
@@ -16,6 +17,7 @@ from app.common import APIError, DemoId, decode_cursor, encode_cursor, get_db, n
 from app.workflow import Evidence, Pattern, UpstageResponseError, invoke_workflow
 
 router = APIRouter(prefix="/api/v1", tags=["cases"])
+MAX_DEFENSE_QUESTIONS = 5
 CaseStatus = Literal["received", "evidence_review", "defense", "decision_review", "closed", "support_required"]
 DecisionType = Literal["reframed", "deferred", "action_needed"]
 LongText = Annotated[str, StringConstraints(min_length=1, max_length=2000)]
@@ -249,6 +251,22 @@ async def intake(request: Request, demo_id: DemoId, key: CaseKey, payload: Intak
                 raise APIError(409, "IDEMPOTENCY_CONFLICT", "이 요청 키는 다른 입력에 사용되었습니다.")
             return intake_response(saved["response_status"], saved["response_body"])
 
+        max_cases = int(os.getenv("MAX_CASES_PER_IP", "3"))
+        if max_cases > 0:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                               (f"case-limit:{demo_id}",))
+            counted = await fetch_one(conn, """
+                SELECT COALESCE(SUM(last_number), 0) AS total
+                FROM court_demo.case_number_counters
+                WHERE demo_id = %s
+            """, (demo_id,))
+            if counted and counted["total"] >= max_cases:
+                raise APIError(
+                    429,
+                    "CASE_LIMIT_REACHED",
+                    f"체험은 IP당 최대 {max_cases}번까지 진행할 수 있어요.",
+                )
+
         emotion = payload.emotion
         row = await fetch_one(conn, """
             INSERT INTO court_demo.cases
@@ -330,7 +348,7 @@ async def detail(request: Request, demo_id: DemoId, case_id: UUID):
         return {"case": case_detail_fields(case), "evidence": await evidence_for(conn, case_id),
                 "questions": questions, "decision": await decision_for(conn, case_id),
                 "can_request_decision": case["status"] == "defense" and all_answered,
-                "defense_completed": all_answered and len(questions) == 3}
+                "defense_completed": all_answered and len(questions) >= MAX_DEFENSE_QUESTIONS}
 
 
 @router.delete("/cases/{case_id}", status_code=204)
@@ -396,8 +414,12 @@ async def next_question(request: Request, response: Response, demo_id: DemoId, c
         if turns and turns[-1]["answer_status"] == "pending":
             response.status_code = 200
             return turns[-1]
-        if len(turns) >= 3:
-            raise APIError(409, "DEFENSE_COMPLETED", "세 질문을 모두 처리했습니다. 판결을 요청해 주세요.")
+        if len(turns) >= MAX_DEFENSE_QUESTIONS:
+            raise APIError(
+                409,
+                "DEFENSE_COMPLETED",
+                f"질문 {MAX_DEFENSE_QUESTIONS}개를 모두 처리했습니다. 판결을 요청해 주세요.",
+            )
         evidence = await evidence_for(conn, case_id)
     draft = await generate(request, "defense", **context_for(case, evidence, turns))
     async with db.connection() as conn:

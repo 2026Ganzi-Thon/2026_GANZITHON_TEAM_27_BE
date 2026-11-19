@@ -22,7 +22,10 @@ class CommunityIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.environment = patch.dict(os.environ, {
-            "DATABASE_URL": os.environ["TEST_DATABASE_URL"], "AI_PROVIDER": "mock",
+            "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+            "AI_PROVIDER": "mock",
+            "DEMO_IDENTITY_MODE": "header",
+            "MAX_CASES_PER_IP": "0",
         })
         cls.environment.start()
         cls.client = TestClient(app)

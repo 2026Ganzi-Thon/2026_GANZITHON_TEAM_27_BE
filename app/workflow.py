@@ -364,7 +364,7 @@ def _format_user_message(stage: Stage, record: dict) -> str:
     turns = record.get("turns") or []
     turn_num = len(turns) + 1
     lines = [
-        f"현재 변론 단계: {turn_num}번째 질문 생성 (총 3개 중 {turn_num}번째)",
+        f"현재 변론 단계: {turn_num}번째 질문 생성 (총 5개 중 {turn_num}번째)",
         f"- 원래 생각: {record.get('thought', '')}",
         f"- 검토할 주장: {record.get('claim', '')}",
         f"- 사고 패턴: {', '.join(record.get('pattern_tags') or []) or '없음'}",

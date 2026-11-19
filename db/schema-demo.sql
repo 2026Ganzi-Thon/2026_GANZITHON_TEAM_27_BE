@@ -102,7 +102,7 @@ CREATE TABLE court_demo.case_evidence (
 CREATE TABLE court_demo.defense_turns (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     case_id uuid NOT NULL REFERENCES court_demo.cases(id) ON DELETE CASCADE,
-    sequence smallint NOT NULL CHECK (sequence BETWEEN 1 AND 3),
+    sequence smallint NOT NULL CHECK (sequence BETWEEN 1 AND 5),
     revision smallint NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 2),
     question text NOT NULL CHECK (char_length(btrim(question)) BETWEEN 1 AND 1000),
     prompts text[] NOT NULL DEFAULT '{}',
