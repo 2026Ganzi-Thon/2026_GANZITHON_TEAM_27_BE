@@ -1,5 +1,6 @@
 """Anonymous community posts, comments, reactions, and protected case sharing."""
 
+import os
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -39,6 +40,25 @@ CommentBody = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 # Never expose the stable demo ID or the linked private case ID to other readers.
 POST_FIELDS = """
     p.id, p.title, p.body, p.tags, p.visibility, p.status, p.created_at, p.published_at,
+    '익명'::text AS author_label,
+    p.demo_id = %(viewer)s AS is_mine,
+    (SELECT count(*) FROM court_demo.post_likes l WHERE l.post_id = p.id) AS like_count,
+    (SELECT count(*) FROM court_demo.post_comments c WHERE c.post_id = p.id) AS comment_count,
+    EXISTS (SELECT 1 FROM court_demo.post_likes l
+            WHERE l.post_id = p.id AND l.demo_id = %(viewer)s) AS liked_by_me,
+    EXISTS (SELECT 1 FROM court_demo.post_bookmarks b
+            WHERE b.post_id = p.id AND b.demo_id = %(viewer)s) AS bookmarked_by_me
+"""
+# 목록에서 남의 비공개(password_protected) 글은 제목·본문·태그를 가리고 잠금 행으로만 노출한다.
+FEED_POST_FIELDS = """
+    p.id,
+    CASE WHEN p.visibility = 'password_protected' AND p.demo_id <> %(viewer)s
+         THEN NULL ELSE p.title END AS title,
+    CASE WHEN p.visibility = 'password_protected' AND p.demo_id <> %(viewer)s
+         THEN NULL ELSE p.body END AS body,
+    CASE WHEN p.visibility = 'password_protected' AND p.demo_id <> %(viewer)s
+         THEN '{}'::text[] ELSE p.tags END AS tags,
+    p.visibility, p.status, p.created_at, p.published_at,
     '익명'::text AS author_label,
     p.demo_id = %(viewer)s AS is_mine,
     (SELECT count(*) FROM court_demo.post_likes l WHERE l.post_id = p.id) AS like_count,
@@ -149,18 +169,21 @@ async def _create_post(payload: CreatePost, demo_id: UUID, db: Database, case_id
         except HashingError:
             raise APIError(503, "PASSWORD_UNAVAILABLE", "비밀번호를 처리할 수 없습니다.") from None
 
+    auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "false").strip().lower() in ("1", "true", "yes")
+    initial_status = "published" if auto_publish else "pending_review"
+
     async with db.connection() as connection:
         if case_id is not None:
             await _require_closed_case(connection, case_id, demo_id)
         cursor = await connection.execute(
             """
             INSERT INTO court_demo.case_posts
-                (case_id, demo_id, visibility, title, body, tags, password_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (case_id, demo_id, visibility, status, title, body, tags, password_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, status
             """,
             (
-                case_id, demo_id, payload.visibility, payload.title, payload.body,
+                case_id, demo_id, payload.visibility, initial_status, payload.title, payload.body,
                 list(dict.fromkeys(payload.tags)), password_hash,
             ),
         )
@@ -190,8 +213,11 @@ async def list_posts(
     limit: PageSize = 20,
     cursor: Cursor = None,
 ):
-    conditions = ["p.visibility = 'public'", "p.status = 'published'"]
+    conditions = ["p.status = 'published'"]
     parameters: dict[str, Any] = {"viewer": demo_id, "limit": limit + 1}
+    if tag is not None or q is not None:
+        # 태그·검색어로는 공개 글만 매칭해 비공개 글 내용이 추측되지 않게 한다.
+        conditions.append("p.visibility = 'public'")
     if tag is not None:
         conditions.append("p.tags @> ARRAY[%(tag)s]::text[]")
         parameters["tag"] = tag
@@ -207,7 +233,7 @@ async def list_posts(
     async with db.connection() as connection:
         result = await connection.execute(
             f"""
-            SELECT {POST_FIELDS} FROM court_demo.case_posts p
+            SELECT {FEED_POST_FIELDS} FROM court_demo.case_posts p
             WHERE {where}
             ORDER BY p.published_at DESC, p.id DESC LIMIT %(limit)s
             """,
