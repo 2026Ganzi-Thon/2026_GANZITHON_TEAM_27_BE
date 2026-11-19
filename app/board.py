@@ -315,15 +315,18 @@ async def edit_post(post_id: UUID, payload: EditPost, demo_id: DemoId, db: Db):
             raise post_not_found()
         if needs_support(payload.title, payload.body, *(payload.tags or [])):
             return support_response()
+        auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "false").strip().lower() in ("1", "true", "yes")
+        next_status = "published" if auto_publish else "pending_review"
         result = await connection.execute(
             """
             UPDATE court_demo.case_posts
-            SET title = %s, body = %s, tags = coalesce(%s::text[], tags), status = 'pending_review'
+            SET title = %s, body = %s, tags = coalesce(%s::text[], tags), status = %s
             WHERE id = %s
             RETURNING id, status
             """,
             (payload.title, payload.body,
-             list(dict.fromkeys(payload.tags)) if payload.tags is not None else None, post_id),
+             list(dict.fromkeys(payload.tags)) if payload.tags is not None else None,
+             next_status, post_id),
         )
         return await result.fetchone()
 
