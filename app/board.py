@@ -169,7 +169,7 @@ async def _create_post(payload: CreatePost, demo_id: UUID, db: Database, case_id
         except HashingError:
             raise APIError(503, "PASSWORD_UNAVAILABLE", "비밀번호를 처리할 수 없습니다.") from None
 
-    auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "false").strip().lower() in ("1", "true", "yes")
+    auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "true").strip().lower() in ("1", "true", "yes")
     initial_status = "published" if auto_publish else "pending_review"
 
     async with db.connection() as connection:
@@ -315,7 +315,7 @@ async def edit_post(post_id: UUID, payload: EditPost, demo_id: DemoId, db: Db):
             raise post_not_found()
         if needs_support(payload.title, payload.body, *(payload.tags or [])):
             return support_response()
-        auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "false").strip().lower() in ("1", "true", "yes")
+        auto_publish = os.getenv("BOARD_AUTO_PUBLISH", "true").strip().lower() in ("1", "true", "yes")
         next_status = "published" if auto_publish else "pending_review"
         result = await connection.execute(
             """

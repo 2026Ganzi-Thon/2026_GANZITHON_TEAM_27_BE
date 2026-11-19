@@ -26,6 +26,7 @@ class CommunityIntegrationTests(unittest.TestCase):
             "AI_PROVIDER": "mock",
             "DEMO_IDENTITY_MODE": "header",
             "MAX_CASES_PER_IP": "0",
+            "BOARD_AUTO_PUBLISH": "false",
         })
         cls.environment.start()
         cls.client = TestClient(app)
